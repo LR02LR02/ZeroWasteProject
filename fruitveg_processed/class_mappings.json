@@ -1,0 +1,40 @@
+{
+    "item_to_id": {
+        "apple": 0,
+        "banana": 1,
+        "brinjal": 2,
+        "chillies": 3,
+        "cucumber": 4,
+        "guava": 5,
+        "lemon": 6,
+        "orange": 7,
+        "pepper": 8,
+        "potato": 9,
+        "tomato": 10
+    },
+    "id_to_item": {
+        "0": "Apple",
+        "1": "Banana",
+        "2": "Brinjal",
+        "3": "Chillies",
+        "4": "Cucumber",
+        "5": "Guava",
+        "6": "Lemon",
+        "7": "Orange",
+        "8": "Pepper",
+        "9": "Potato",
+        "10": "Tomato"
+    },
+    "stage_to_id": {
+        "fresh": 0,
+        "medium": 1,
+        "rotten": 2
+    },
+    "id_to_stage": {
+        "0": "Fresh",
+        "1": "Medium",
+        "2": "Rotten"
+    },
+    "num_items": 11,
+    "num_stages": 3
+}
