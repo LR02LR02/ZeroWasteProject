@@ -1516,6 +1516,331 @@ def process_recipe_action(
             )
         )
 
+# ---------------------------------------------------------
+# Typed recipe-selection helpers
+# ---------------------------------------------------------
+
+def normalise_recipe_match_tokens(text):
+    """
+    Normalise text for matching typed messages against
+    recipe names that were previously suggested.
+
+    A small amount of plural normalisation is included so,
+    for example, "Creamed Cucumbers" can match
+    "creamed cucumber".
+    """
+    cleaned = re.sub(
+        r"[^a-z0-9\s]",
+        " ",
+        str(text).lower()
+    )
+
+    tokens = []
+
+    for word in cleaned.split():
+        if (
+            len(word) > 4
+            and word.endswith("ies")
+        ):
+            # berries -> berry
+            word = word[:-3] + "y"
+
+        elif (
+            len(word) > 4
+            and word.endswith("oes")
+        ):
+            # tomatoes -> tomato
+            word = word[:-2]
+
+        elif (
+            len(word) > 4
+            and word.endswith(
+                (
+                    "ches",
+                    "shes",
+                    "xes",
+                    "zes"
+                )
+            )
+        ):
+            word = word[:-2]
+
+        elif (
+            len(word) > 3
+            and word.endswith("s")
+            and not word.endswith(
+                (
+                    "ss",
+                    "us",
+                    "is"
+                )
+            )
+        ):
+            # cucumbers -> cucumber
+            # apples -> apple
+            word = word[:-1]
+
+        tokens.append(word)
+
+    return tokens
+
+
+def find_suggested_recipe(message):
+    """
+    Match a typed message to a recipe that has already been
+    shown in the current conversation.
+
+    Returns:
+        (event_index, candidate_index, candidate_record)
+
+    or None if no previously suggested recipe is matched.
+    """
+    message_tokens = normalise_recipe_match_tokens(
+        message
+    )
+
+    if not message_tokens:
+        return None
+
+    message_text = " ".join(
+        message_tokens
+    )
+
+    message_token_set = set(
+        message_tokens
+    )
+
+    possible_matches = []
+
+    for event_index, event in enumerate(
+        st.session_state.get(
+            "chat_events",
+            []
+        )
+    ):
+        if event.get("type") != "candidates":
+            continue
+
+        candidates = event.get(
+            "candidates",
+            []
+        )
+
+        for candidate_index, record in enumerate(
+            candidates
+        ):
+            recipe_name = str(
+                record.get(
+                    "name",
+                    ""
+                )
+            ).strip()
+
+            if not recipe_name:
+                continue
+
+            recipe_tokens = normalise_recipe_match_tokens(
+                recipe_name
+            )
+
+            if not recipe_tokens:
+                continue
+
+            recipe_text = " ".join(
+                recipe_tokens
+            )
+
+            exact_phrase_match = (
+                recipe_text in message_text
+            )
+
+            token_match = (
+                set(recipe_tokens)
+                .issubset(
+                    message_token_set
+                )
+            )
+
+            if (
+                exact_phrase_match
+                or token_match
+            ):
+                possible_matches.append(
+                    (
+                        len(recipe_tokens),
+                        len(recipe_text),
+                        event_index,
+                        candidate_index,
+                        record
+                    )
+                )
+
+    if not possible_matches:
+        return None
+
+    # Prefer the most specific matching recipe title.
+    possible_matches.sort(
+        reverse=True,
+        key=lambda match: (
+            match[0],
+            match[1]
+        )
+    )
+
+    (
+        _,
+        _,
+        event_index,
+        candidate_index,
+        record
+    ) = possible_matches[0]
+
+    return (
+        event_index,
+        candidate_index,
+        record
+    )
+
+
+def process_selected_recipe(
+    selected_record,
+    recipe_inventory,
+    user_message=None,
+    event_index=None
+):
+    """
+    Adapt and validate a recipe selected either by clicking
+    its candidate button or by typing its recipe name.
+    """
+    # Once a recipe from a suggestion group is selected,
+    # disable that group's candidate buttons.
+    if (
+        event_index is not None
+        and 0 <= event_index
+        < len(st.session_state.chat_events)
+    ):
+        st.session_state.chat_events[
+            event_index
+        ]["active"] = False
+
+    selected_name = str(
+        selected_record.get(
+            "name",
+            "Selected recipe"
+        )
+    )
+
+    append_chat_message(
+        "user",
+        (
+            user_message
+            if user_message
+            else f"I want to cook {selected_name}"
+        )
+    )
+
+    append_chat_message(
+        "assistant",
+        (
+            f"Great choice! I'll adapt {selected_name} "
+            "using only the ingredients allowed from "
+            "your kitchen."
+        )
+    )
+
+    api_key = get_api_key()
+
+    if not api_key:
+        append_chat_message(
+            "assistant",
+            (
+                "The recipe-generation service is not "
+                "connected yet. Add OPENAI_API_KEY to "
+                "Streamlit Secrets, then choose the "
+                "recipe again."
+            )
+        )
+        return
+
+    selected_candidate = pd.DataFrame(
+        [
+            selected_record
+        ]
+    )
+
+    try:
+        with st.spinner(
+            "Preparing your recipe..."
+        ):
+            (
+                adapted,
+                report,
+                attempts
+            ) = generate_validated_recipe(
+                recipe_inventory,
+                selected_candidate,
+                api_key,
+                model_name=LLM_MODEL,
+                max_attempts=1
+            )
+
+        st.session_state.recipe_result = {
+            "candidate": selected_record,
+            "adapted": adapted,
+            "report": report,
+            "attempts": attempts
+        }
+
+        if (
+            adapted is not None
+            and report is not None
+            and report.get(
+                "usable_recipe",
+                False
+            )
+        ):
+            append_chat_message(
+                "assistant",
+                (
+                    "Done! I adapted the recipe to "
+                    "your kitchen and checked it before "
+                    "showing it to you."
+                )
+            )
+
+        else:
+            append_chat_message(
+                "assistant",
+                (
+                    "I couldn't make an approved "
+                    "version of that recipe using only "
+                    "your current ingredients. You can "
+                    "choose another option below."
+                )
+            )
+
+        st.session_state.chat_events.append(
+            {
+                "type": "recipe",
+                "role": "assistant",
+                "adapted": adapted,
+                "report": report,
+                "attempts": attempts
+            }
+        )
+
+        st.session_state.scroll_to_latest = True
+
+    except Exception as error:
+        append_chat_message(
+            "assistant",
+            (
+                "I couldn't prepare that recipe "
+                f"right now. Please try again. ({error})"
+            )
+        )
+
+
 def process_typed_message(
     message,
     recipe_inventory,
@@ -1530,6 +1855,29 @@ def process_typed_message(
     lower = text.lower()
 
     if not text:
+        return
+
+    # First, check whether the typed message refers to a
+    # recipe that has already been suggested. This must
+    # happen before the generic "cook" / "recipe" routing.
+    matched_recipe = find_suggested_recipe(
+        text
+    )
+
+    if matched_recipe is not None:
+        (
+            event_index,
+            candidate_index,
+            selected_record
+        ) = matched_recipe
+
+        process_selected_recipe(
+            selected_record,
+            recipe_inventory,
+            user_message=text,
+            event_index=event_index
+        )
+
         return
 
     recipe_words = [
@@ -3263,121 +3611,11 @@ if page == "🍳 Recipe Assistant":
             selected_record
         ) = candidate_clicked
 
-        # Disable the old candidate buttons after selection.
-        st.session_state.chat_events[
-            event_index
-        ][
-            "active"
-        ] = False
-
-        selected_name = selected_record[
-            "name"
-        ]
-
-        append_chat_message(
-            "user",
-            f"I want to cook {selected_name}"
+        process_selected_recipe(
+            selected_record,
+            recipe_inventory,
+            event_index=event_index
         )
-
-        append_chat_message(
-            "assistant",
-            (
-                f"Great choice! I'll adapt {selected_name} "
-                "using only the ingredients allowed from "
-                "your kitchen."
-            )
-        )
-
-        api_key = get_api_key()
-
-        if not api_key:
-            append_chat_message(
-                "assistant",
-                (
-                    "The recipe-generation service is not "
-                    "connected yet. Add OPENAI_API_KEY to "
-                    "Streamlit Secrets, then choose the "
-                    "recipe again."
-                )
-            )
-
-        else:
-            selected_candidate = pd.DataFrame(
-                [
-                    selected_record
-                ]
-            )
-
-            try:
-                with st.spinner(
-                    "Preparing your recipe..."
-                ):
-                    (
-                        adapted,
-                        report,
-                        attempts
-                    ) = generate_validated_recipe(
-                        recipe_inventory,
-                        selected_candidate,
-                        api_key,
-                        model_name=LLM_MODEL,
-                        max_attempts=1
-                    )
-
-                st.session_state.recipe_result = {
-                    "candidate": selected_record,
-                    "adapted": adapted,
-                    "report": report,
-                    "attempts": attempts
-                }
-
-                if (
-                    adapted is not None
-                    and report is not None
-                    and report.get(
-                        "usable_recipe",
-                        False
-                    )
-                ):
-                    append_chat_message(
-                        "assistant",
-                        (
-                            "Done! I adapted the recipe to "
-                            "your kitchen and checked it before "
-                            "showing it to you."
-                        )
-                    )
-                else:
-                    append_chat_message(
-                        "assistant",
-                        (
-                            "I couldn't make an approved "
-                            "version of that recipe using only "
-                            "your current ingredients. You can "
-                            "choose another option below."
-                        )
-                    )
-
-                st.session_state.chat_events.append(
-                    {
-                        "type": "recipe",
-                        "role": "assistant",
-                        "adapted": adapted,
-                        "report": report,
-                        "attempts": attempts
-                    }
-                )
-
-                st.session_state.scroll_to_latest = True
-
-            except Exception as error:
-                append_chat_message(
-                    "assistant",
-                    (
-                        "I couldn't prepare that recipe "
-                        f"right now. Please try again. ({error})"
-                    )
-                )
 
         st.rerun()
 
