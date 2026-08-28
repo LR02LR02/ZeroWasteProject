@@ -16,7 +16,7 @@ ZWaste is a research prototype for household food-waste mitigation. It combines 
 ## Project Structure
 
 ```text
-ZWasteProject/
+ZeroWasteProject/
 ├── app/
 │   ├── app.py
 │   └── utils.py
@@ -82,7 +82,7 @@ Add the following values in the Streamlit Community Cloud **Secrets** settings:
 OPENAI_API_KEY = "your_openai_api_key"
 
 GITHUB_REVIEW_TOKEN = "your_github_personal_access_token"
-GITHUB_REVIEW_REPO = "YOUR_GITHUB_USERNAME/ZWasteProject"
+GITHUB_REVIEW_REPO = "YOUR_GITHUB_USERNAME/ZeroWasteProject"
 GITHUB_REVIEW_BRANCH = "main"
 GITHUB_REVIEW_FILE = "reviews/reviews.csv"
 ```
