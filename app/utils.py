@@ -6,6 +6,7 @@ import re
 import joblib
 import numpy as np
 import pandas as pd
+import requests
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 from scipy.sparse import load_npz
@@ -22,7 +23,7 @@ from openai import OpenAI
 
 
 IMAGE_SIZE = 224
-UTILS_VERSION = "2026-08-21-v4-condition-aware-inventory"
+UTILS_VERSION = "2026-08-28-v5-deployment-and-recipe-validation"
 
 EVAL_TRANSFORM = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
@@ -83,6 +84,12 @@ DETECTOR_TO_ZWASTE = {
 DEFAULT_DETECTION_CONF = 0.06
 DEFAULT_DETECTOR_WEIGHTS = "yoloe-26s-seg.pt"
 
+MOBILECLIP_FILENAME = "mobileclip2_b.ts"
+MOBILECLIP_URL = (
+    "https://github.com/ultralytics/assets/releases/download/"
+    "v8.4.0/mobileclip2_b.ts"
+)
+
 PANTRY_STAPLES = {
     "water",
     "salt",
@@ -112,7 +119,9 @@ DERIVED_PRODUCT_WORDS = {
     "concentrate", "puree", "flour", "starch",
     "chip", "chips", "noodle", "noodles",
     "soup", "broth", "stock", "bouillon",
-    "consomme", "gravy", "dressing", "ketchup"
+    "consomme", "gravy", "dressing", "ketchup",
+    "sherbet", "sorbet", "gelatin", "jell", "jello",
+    "marmalade"
 }
 
 MEASUREMENT_WORDS = {
@@ -357,11 +366,75 @@ def predict_with_gradcam(image, model, mappings, device):
     return record, overlay
 
 
+def ensure_mobileclip_weights():
+    """Ensure the YOLOE text encoder is available at runtime.
+
+    YOLOE text prompting loads ``mobileclip2_b.ts`` by filename. On
+    ephemeral deployments such as Streamlit Community Cloud, the lazy
+    Ultralytics download can occasionally fail before the file exists.
+    This helper downloads the official asset explicitly when needed.
+    """
+    file_path = Path.cwd() / MOBILECLIP_FILENAME
+
+    if file_path.exists() and file_path.stat().st_size > 0:
+        return file_path
+
+    temporary_path = file_path.with_suffix(
+        file_path.suffix + ".part"
+    )
+
+    try:
+        response = requests.get(
+            MOBILECLIP_URL,
+            stream=True,
+            timeout=300
+        )
+        response.raise_for_status()
+
+        with open(temporary_path, "wb") as output_file:
+            for chunk in response.iter_content(
+                chunk_size=1024 * 1024
+            ):
+                if chunk:
+                    output_file.write(chunk)
+
+        if (
+            not temporary_path.exists()
+            or temporary_path.stat().st_size == 0
+        ):
+            raise RuntimeError(
+                "The MobileCLIP download completed without "
+                "creating a usable file."
+            )
+
+        temporary_path.replace(file_path)
+
+    except Exception as error:
+        try:
+            if temporary_path.exists():
+                temporary_path.unlink()
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "YOLOE requires mobileclip2_b.ts for text-prompt "
+            "initialisation, but the file could not be prepared. "
+            f"Details: {error}"
+        ) from error
+
+    return file_path
+
+
 def load_object_detector(
     weights=DEFAULT_DETECTOR_WEIGHTS,
     detection_classes=None
 ):
     from ultralytics import YOLOE
+
+    # YOLOE-26 text prompting requires this encoder when set_classes()
+    # is called. Keeping it in the current working directory matches
+    # the filename-based lookup used by the runtime.
+    ensure_mobileclip_weights()
 
     detector = YOLOE(weights)
 
@@ -1585,6 +1658,8 @@ def generate_validated_recipe(
         return None, None, []
 
     attempts = []
+    last_adapted = None
+    last_report = None
 
     for _, row in usable.head(
         max_attempts
@@ -1603,6 +1678,9 @@ def generate_validated_recipe(
             inventory_data
         )
 
+        last_adapted = adapted
+        last_report = report
+
         attempts.append({
             "candidate": candidate["name"],
             "status": adapted.get("status"),
@@ -1611,10 +1689,44 @@ def generate_validated_recipe(
             ],
             "usable_recipe": report[
                 "usable_recipe"
-            ]
+            ],
+            "structure_valid": report.get(
+                "structure_valid",
+                False
+            ),
+            "allowed_ingredients_valid": report.get(
+                "allowed_ingredients_valid",
+                False
+            ),
+            "excluded_ingredients_valid": report.get(
+                "excluded_ingredients_valid",
+                False
+            ),
+            "priority_compliant": report.get(
+                "priority_compliant",
+                False
+            ),
+            "priority_field_consistent": report.get(
+                "priority_field_consistent",
+                False
+            ),
+            "missing_priority_ingredients": report.get(
+                "missing_priority_ingredients",
+                []
+            ),
+            "hallucinated_ingredients": report.get(
+                "hallucinated_ingredients",
+                []
+            ),
+            "excluded_ingredients_found": report.get(
+                "excluded_ingredients_found",
+                []
+            )
         })
 
         if report["usable_recipe"]:
             return adapted, report, attempts
 
-    return None, None, attempts
+    # Preserve the final failed adaptation and its detailed validation
+    # report so the interface can explain WHY the recipe was rejected.
+    return last_adapted, last_report, attempts
